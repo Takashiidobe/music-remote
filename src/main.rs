@@ -1,6 +1,6 @@
-use std::path::Path;
-use std::process::Command;
-use wait_timeout::ChildExt;
+use std::io::{Read, Seek, Write};
+use std::process::{Child, Command, Stdio};
+use std::{fs::File, path::Path};
 
 #[derive(Debug, Default, Clone)]
 enum Status {
@@ -65,7 +65,60 @@ fn parse(lines: &[&str]) -> Status {
     }
 }
 
-fn action(prev_lyrics: Option<String>) -> Option<String> {
+fn write_to_tmp_file(
+    prev_file: Option<File>,
+    prev_child: Option<Child>,
+    lyrics: String,
+    info: Info,
+) -> (File, Child) {
+    let mut tmpfile = if let Some(f) = prev_file {
+        f
+    } else {
+        File::create("/tmp/.tmp1").expect("File failed to create")
+    };
+
+    tmpfile.set_len(0).expect("Truncating file failed");
+    tmpfile.rewind().expect("rewinding failed");
+
+    let mut metadata_lines = 0;
+
+    if let Some(title) = info.title {
+        writeln!(tmpfile, "Title: {}", title).expect("writing to temp file failed");
+        metadata_lines += 1;
+    }
+
+    if let Some(album) = info.album {
+        writeln!(tmpfile, "Album: {}", album).expect("writing to temp file failed");
+        metadata_lines += 1;
+    }
+
+    if let Some(artist) = info.artist {
+        writeln!(tmpfile, "Artist: {}", artist).expect("writing to temp file failed");
+        metadata_lines += 1;
+    }
+
+    if metadata_lines > 0 {
+        writeln!(tmpfile).expect("Failed to write to file");
+    }
+
+    write!(tmpfile, "{}", lyrics).expect("Writing to temp file failed");
+
+    tmpfile.rewind().expect("rewinding failed");
+
+    let child = if let Some(c) = prev_child {
+        c
+    } else {
+        Command::new("nvim").arg("/tmp/.tmp1").spawn().unwrap()
+    };
+
+    (tmpfile, child)
+}
+
+fn action(
+    prev_lyrics: Option<String>,
+    prev_file: Option<File>,
+    prev_child: Option<Child>,
+) -> (Option<String>, Option<File>, Option<Child>) {
     let c = Command::new("cmus-remote")
         .arg("-Q")
         .output()
@@ -80,44 +133,43 @@ fn action(prev_lyrics: Option<String>) -> Option<String> {
     let status = parse(&lines);
 
     match status {
-        Status::Undefined | Status::Stopped => prev_lyrics,
+        Status::Undefined | Status::Stopped => (prev_lyrics, prev_file, prev_child),
         Status::Playing(info) | Status::Paused(info) => {
-            let lyrics_file = (info.file + ".lyrics").to_string();
+            let lyrics_file = (info.file.clone() + ".lyrics").to_string();
 
-            if let Some(p_lyrics) = prev_lyrics {
+            if let Some(p_lyrics) = prev_lyrics.clone() {
                 if p_lyrics == lyrics_file {
-                    return Some(p_lyrics.clone());
+                    return (Some(p_lyrics.clone()), prev_file, prev_child);
                 }
             }
 
             match Path::new(&lyrics_file).exists() {
                 true => {
-                    let mut child = Command::new("bat")
-                        .arg(lyrics_file.clone())
-                        .arg(&format!(
-                            "--file-name={}-{}",
-                            info.title.unwrap_or("Unknown Title".to_string()),
-                            info.album.unwrap_or("Unknown Album".to_string()),
-                        ))
-                        .spawn()
-                        .unwrap();
+                    let lyrics = std::fs::read_to_string(&lyrics_file).expect("reading failed");
 
-                    let three_secs = Duration::from_secs(3);
-                    match child.wait_timeout(three_secs).unwrap() {
-                        Some(_) => {}
-                        None => {
-                            child.kill().unwrap();
-                        }
-                    };
-                    Some(lyrics_file)
+                    let (tmpfile, child) = write_to_tmp_file(prev_file, prev_child, lyrics, info);
+
+                    (Some(lyrics_file), Some(tmpfile), Some(child))
                 }
                 false => {
-                    let mut c = Command::new("lyrics")
-                        .spawn()
-                        .expect("Lyrics utility didn't work");
+                    let mut s = String::default();
+                    if let (Some(artist), Some(song)) = (info.artist.clone(), info.title.clone()) {
+                        let mut c = Command::new("lyrics")
+                            .args(["-t", &artist, &song])
+                            .stdout(Stdio::piped())
+                            .spawn()
+                            .expect("Lyrics utility didn't work")
+                            .stdout
+                            .unwrap();
 
-                    c.wait().expect("Lyrics utility failed to spawn");
-                    Some(lyrics_file)
+                        c.read_to_string(&mut s).unwrap();
+
+                        let (tmpfile, child) = write_to_tmp_file(prev_file, prev_child, s, info);
+
+                        (Some(lyrics_file), Some(tmpfile), Some(child))
+                    } else {
+                        (None, None, None)
+                    }
                 }
             }
         }
@@ -130,10 +182,16 @@ fn main() {
     let wait_time = Duration::from_secs(1);
 
     let mut prev_lyrics_file = None;
+    let mut prev_file = None;
+    let mut prev_child = None;
 
     loop {
-        let new_lyrics_file = action(prev_lyrics_file.clone());
+        let (new_lyrics_file, new_file, new_child) =
+            action(prev_lyrics_file.clone(), prev_file, prev_child);
         prev_lyrics_file = new_lyrics_file;
+        prev_file = new_file;
+        prev_child = new_child;
+
         thread::sleep(wait_time);
     }
 }
