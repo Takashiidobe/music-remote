@@ -49,7 +49,7 @@ fn parse(lines: &[&str]) -> Status {
                 info.album = Some(line[2..].join(" ").to_string());
             } else if line[1] == "title" {
                 info.title = Some(line[2..].join(" ").to_string());
-            } else if line[1] == "date" {
+            } else if line[1] == "date" || line[1] == "originaldate" {
                 info.date = Some(line[2].parse().expect("Could not parse to integer"));
             } else if line[1] == "tracknumber" {
                 info.track_number = Some(line[2].parse().expect("Could not parse to integer"));
@@ -97,6 +97,16 @@ fn write_to_tmp_file(
         metadata_lines += 1;
     }
 
+    if let Some(year) = info.date {
+        writeln!(tmpfile, "Year: {}", year).expect("writing to temp file failed");
+        metadata_lines += 1;
+    }
+
+    if let Some(track_num) = info.track_number {
+        writeln!(tmpfile, "Track Number: {}", track_num).expect("writing to temp file failed");
+        metadata_lines += 1;
+    }
+
     if metadata_lines > 0 {
         writeln!(tmpfile).expect("Failed to write to file");
     }
@@ -108,7 +118,11 @@ fn write_to_tmp_file(
     let child = if let Some(c) = prev_child {
         c
     } else {
-        Command::new("nvim").arg("/tmp/.tmp1").spawn().unwrap()
+        Command::new("nvim")
+            .arg("-R")
+            .arg("/tmp/.tmp1")
+            .spawn()
+            .unwrap()
     };
 
     (tmpfile, child)
@@ -158,11 +172,19 @@ fn action(
                             .args(["-t", &artist, &song])
                             .stdout(Stdio::piped())
                             .spawn()
-                            .expect("Lyrics utility didn't work")
-                            .stdout
-                            .unwrap();
+                            .expect("Lyrics utility didn't work");
 
-                        c.read_to_string(&mut s).unwrap();
+                        let stdout = c.stdout.as_mut().unwrap();
+
+                        stdout.read_to_string(&mut s).unwrap();
+
+                        c.wait().expect("lyrics failed to resolve");
+
+                        let mut lyrics_file_handle =
+                            File::create(&lyrics_file).expect("Failed to create lyrics file");
+
+                        write!(lyrics_file_handle, "{}", s)
+                            .expect("Failed to write lyrics to file");
 
                         let (tmpfile, child) = write_to_tmp_file(prev_file, prev_child, s, info);
 
