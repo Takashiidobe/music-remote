@@ -6,6 +6,9 @@ env:
   CROSS_TARGET_I686_LINUX_ANDROID_IMAGE: "ghcr.io/cross-rs/i686-linux-android:main"
   CROSS_TARGET_X86_64_LINUX_ANDROID_IMAGE: "ghcr.io/cross-rs/x86_64-linux-android:main"
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
